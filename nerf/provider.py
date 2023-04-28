@@ -65,7 +65,7 @@ def rand_poses(size, device, radius=1, theta_range=[np.pi/3, 2*np.pi/3], phi_ran
     Return:
         poses: [size, 4, 4]
     '''
-    
+
     def normalize(vectors):
         return vectors / (torch.norm(vectors, dim=-1, keepdim=True) + 1e-10)
 
@@ -94,7 +94,7 @@ def rand_poses(size, device, radius=1, theta_range=[np.pi/3, 2*np.pi/3], phi_ran
 class NeRFDataset:
     def __init__(self, opt, device, type='train', downscale=1, n_test=10):
         super().__init__()
-        
+
         self.opt = opt
         self.device = device
         self.type = type # train, val, test
@@ -157,76 +157,54 @@ class NeRFDataset:
         else:
             # we have to actually read an image to get H and W later.
             self.H = self.W = None
-        
+
         # read images
         frames = transform["frames"]
         #frames = sorted(frames, key=lambda d: d['file_path']) # why do I sort...
-        
-        # for colmap, manually interpolate a test set.
-        if self.mode == 'colmap' and type == 'test':
-            
-            # choose two random poses, and interpolate between.
-            f0, f1 = np.random.choice(frames, 2, replace=False)
-            pose0 = nerf_matrix_to_ngp(np.array(f0['transform_matrix'], dtype=np.float32), scale=self.scale, offset=self.offset) # [4, 4]
-            pose1 = nerf_matrix_to_ngp(np.array(f1['transform_matrix'], dtype=np.float32), scale=self.scale, offset=self.offset) # [4, 4]
-            rots = Rotation.from_matrix(np.stack([pose0[:3, :3], pose1[:3, :3]]))
-            slerp = Slerp([0, 1], rots)
 
-            self.poses = []
-            self.images = None
-            for i in range(n_test + 1):
-                ratio = np.sin(((i / n_test) - 0.5) * np.pi) * 0.5 + 0.5
-                pose = np.eye(4, dtype=np.float32)
-                pose[:3, :3] = slerp(ratio).as_matrix()
-                pose[:3, 3] = (1 - ratio) * pose0[:3, 3] + ratio * pose1[:3, 3]
-                self.poses.append(pose)
+        self.poses = []
+        self.images = []
+        for f in tqdm.tqdm(frames, desc=f'Loading {type} data'):
+            f_path = os.path.join(self.root_path, f['file_path'])
 
-        else:
-            # for colmap, manually split a valid set (the first frame).
-            if self.mode == 'colmap':
-                if type == 'train':
-                    frames = frames[1:]
-                elif type == 'val':
-                    frames = frames[:1]
-                # else 'all' or 'trainval' : use all frames
-            
-            self.poses = []
-            self.images = []
-            for f in tqdm.tqdm(frames, desc=f'Loading {type} data'):
-                f_path = os.path.join(self.root_path, f['file_path'])
-                if self.mode == 'blender' and '.' not in os.path.basename(f_path):
-                    f_path += '.png' # so silly...
+            if os.path.exists(f_path + ".png"):
+                f_path += ".png"
+            elif os.path.exists(f_path + ".jpg"):
+                f_path += ".jpg"
+            else:
+                raise NotImplementedError
 
-                # there are non-exist paths in fox...
-                if not os.path.exists(f_path):
-                    continue
-                
-                pose = np.array(f['transform_matrix'], dtype=np.float32) # [4, 4]
-                pose = nerf_matrix_to_ngp(pose, scale=self.scale, offset=self.offset)
+            # there are non-exist paths in fox...
+            if not os.path.exists(f_path):
+                print(f"The image {f_path} is not present.")
+                continue
 
-                image = cv2.imread(f_path, cv2.IMREAD_UNCHANGED) # [H, W, 3] o [H, W, 4]
-                if self.H is None or self.W is None:
-                    self.H = image.shape[0] // downscale
-                    self.W = image.shape[1] // downscale
+            pose = np.array(f['transform_matrix'], dtype=np.float32) # [4, 4]
+            pose = nerf_matrix_to_ngp(pose, scale=self.scale, offset=self.offset)
 
-                # add support for the alpha channel as a mask.
-                if image.shape[-1] == 3: 
-                    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-                else:
-                    image = cv2.cvtColor(image, cv2.COLOR_BGRA2RGBA)
+            image = cv2.imread(f_path, cv2.IMREAD_UNCHANGED) # [H, W, 3] o [H, W, 4]
+            if self.H is None or self.W is None:
+                self.H = image.shape[0] // downscale
+                self.W = image.shape[1] // downscale
 
-                if image.shape[0] != self.H or image.shape[1] != self.W:
-                    image = cv2.resize(image, (self.W, self.H), interpolation=cv2.INTER_AREA)
-                    
-                image = image.astype(np.float32) / 255 # [H, W, 3/4]
+            # add support for the alpha channel as a mask.
+            if image.shape[-1] == 3:
+                image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            else:
+                image = cv2.cvtColor(image, cv2.COLOR_BGRA2RGBA)
 
-                self.poses.append(pose)
-                self.images.append(image)
-            
+            if image.shape[0] != self.H or image.shape[1] != self.W:
+                image = cv2.resize(image, (self.W, self.H), interpolation=cv2.INTER_AREA)
+
+            image = image.astype(np.float32) / 255 # [H, W, 3/4]
+
+            self.poses.append(pose)
+            self.images.append(image)
+
         self.poses = torch.from_numpy(np.stack(self.poses, axis=0)) # [N, 4, 4]
         if self.images is not None:
             self.images = torch.from_numpy(np.stack(self.images, axis=0)) # [N, H, W, C]
-        
+
         # calculate mean radius of all camera poses
         self.radius = self.poses[:, :3, 3].norm(dim=-1).mean(0).item()
         #print(f'[INFO] dataset camera poses: radius = {self.radius:.4f}, bound = {self.bound}')
@@ -270,7 +248,7 @@ class NeRFDataset:
 
         cx = (transform['cx'] / downscale) if 'cx' in transform else (self.W / 2)
         cy = (transform['cy'] / downscale) if 'cy' in transform else (self.H / 2)
-    
+
         self.intrinsics = np.array([fl_x, fl_y, cx, cy])
 
 
@@ -292,13 +270,13 @@ class NeRFDataset:
                 'H': rH,
                 'W': rW,
                 'rays_o': rays['rays_o'],
-                'rays_d': rays['rays_d'],    
+                'rays_d': rays['rays_d'],
             }
 
         poses = self.poses[index].to(self.device) # [B, 4, 4]
 
         error_map = None if self.error_map is None else self.error_map[index]
-        
+
         rays = get_rays(poses, self.intrinsics, self.H, self.W, self.num_rays, error_map, self.opt.patch_size)
 
         results = {
@@ -314,12 +292,12 @@ class NeRFDataset:
                 C = images.shape[-1]
                 images = torch.gather(images.view(B, -1, C), 1, torch.stack(C * [rays['inds']], -1)) # [B, N, 3/4]
             results['images'] = images
-        
+
         # need inds to update error_map
         if error_map is not None:
             results['index'] = index
             results['inds_coarse'] = rays['inds_coarse']
-            
+
         return results
 
     def dataloader(self):
