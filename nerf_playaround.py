@@ -133,6 +133,8 @@ if __name__ == '__main__':
 
     to_pil_image = ToPILImage()
 
+    num_rays = None
+
     with torch.no_grad():
 
         for i, data in enumerate(dataloader):
@@ -146,14 +148,21 @@ if __name__ == '__main__':
                 if bg_color is not None:
                     bg_color = bg_color.to(device)
 
-                rays = get_rays(gt_pose, intrinsics, H, W)
+                # Sample a low-resolution but full image
+                if num_rays is not None:
+                    s = np.sqrt(H * W / num_rays)
+                    H, W = int(H / s), int(W / s)
+                else:
+                    s = 1
+
+                rays = get_rays(gt_pose, intrinsics / s, H, W)
                 rays_o = rays['rays_o'] # [B, N, 3]
                 rays_d = rays['rays_d'] # [B, N, 3]
 
                 outputs = model.render(rays_o, rays_d, staged=True, bg_color=bg_color, perturb=False, **vars(opt))
 
                 preds = outputs['image'].reshape(-1, H, W, 3)
-                preds_depth = outputs['depth'].reshape(-1, H, W)
+                # preds_depth = outputs['depth'].reshape(-1, H, W)
 
             pred = preds[0].detach().cpu().numpy()
             pred = (pred * 255).astype(np.uint8)
