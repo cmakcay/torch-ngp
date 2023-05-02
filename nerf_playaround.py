@@ -1,8 +1,11 @@
 import torch
 import argparse
-from nerf.provider import NeRFDataset
 from nerf.utils import *
 from PIL import Image
+from nerf_pose_estimate.dataset import NerfDataset
+from torch.utils.data import DataLoader
+from torchvision.transforms import ToPILImage
+import matplotlib.pyplot as plt
 
 def load_checkpoint(model, device, checkpoint_path):
     checkpoint_list = sorted(glob.glob(f'{checkpoint_path}/ngp_ep*.pth'))
@@ -117,38 +120,35 @@ if __name__ == '__main__':
         bg_radius=opt.bg_radius,
     )
 
-
-    print(model)
     model.to(device)
     load_checkpoint(model, device, checkpoint_path=f"{opt.workspace}/checkpoints")
     model.eval()
 
-
-    test_loader = NeRFDataset(opt, device=device, type='test').dataloader()
+    dataset = NerfDataset(device=device, path=opt.path, scale=opt.scale, offset=opt.offset)
+    intrinsics = dataset.intrinsics
+    dataloader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=4)
 
     save_path = os.path.join(opt.workspace, 'results')
-
     os.makedirs(save_path, exist_ok=True)
 
+    to_pil_image = ToPILImage()
 
     with torch.no_grad():
 
-        for i, data in enumerate(test_loader):
+        for i, data in enumerate(dataloader):
 
             with torch.cuda.amp.autocast(enabled=opt.fp16):
-                # data = {
-                #     "rays_o": None,
-                #     "rays_d": None,
-                #     "H": 800,
-                #     "W": 800,
-                # }
-                rays_o = data['rays_o'] # [B, N, 3]
-                rays_d = data['rays_d'] # [B, N, 3]
-                H, W = data['H'], data['W']
-                print(rays_d[0,0])
+                H, W = int(data['H']), int(data['W'])
+                gt_pose = data["gt_pose"].to(device)
+                gt_image = data["gt_image"].to(device)
+
                 bg_color = None
                 if bg_color is not None:
                     bg_color = bg_color.to(device)
+
+                rays = get_rays(gt_pose, intrinsics, H, W)
+                rays_o = rays['rays_o'] # [B, N, 3]
+                rays_d = rays['rays_d'] # [B, N, 3]
 
                 outputs = model.render(rays_o, rays_d, staged=True, bg_color=bg_color, perturb=False, **vars(opt))
 
@@ -158,6 +158,13 @@ if __name__ == '__main__':
             pred = preds[0].detach().cpu().numpy()
             pred = (pred * 255).astype(np.uint8)
             pred_img = Image.fromarray(pred)
-            pred_img.show()
-            while True:
-                pass
+
+            gt_img = to_pil_image(gt_image.squeeze(0))
+
+            plt.subplot(1,2,1)
+            plt.imshow(pred_img)
+            plt.gca().set_title("prediction")
+            plt.subplot(1,2,2)
+            plt.imshow(gt_img)
+            plt.gca().set_title("ground truth")
+            plt.show()
